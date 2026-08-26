@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "check-db": "node check-db.js"
+    "check-db": "node check-db.js",
+    "migrate": "node db/migrate.js",
+    "check-schema": "node db/check-schema.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
