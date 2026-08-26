@@ -1,0 +1,184 @@
+// Home page — README §1.
+//
+// Three cards in a row:
+//   1. Most recent completed test (status='latest')   → Review view
+//   2. Second most recent completed test (status='oldest') → Review view
+//   3. "Create New Test"                              → Create flow
+//
+// Below them, if a test with status='upcoming' exists, an Upcoming card
+// with a "Take It" button that launches the test-taking flow.
+//
+// All API calls go through src/api.js so later phases can reuse the same
+// endpoints without rewriting fetch() boilerplate.
+
+import { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { getLatestTest, getOldestTest, getUpcomingTest } from '../api.js';
+
+// Format an ISO timestamp as a friendly "Mon DD, YYYY · h:mm AM/PM" string.
+// Falls back to the raw input if Date can't parse it. Used on the
+// latest/oldest cards to show when the test was completed.
+function formatDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+export default function Home() {
+  const navigate = useNavigate();
+
+  // One entry per status we care about. `null` means "404, not found",
+  // `undefined` means "still loading".
+  const [latest, setLatest] = useState(undefined);
+  const [oldest, setOldest] = useState(undefined);
+  const [upcoming, setUpcoming] = useState(undefined);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    // Fire all three in parallel. The api.js helpers each return null on
+    // 404, so we never have to try/catch individual "not found" cases —
+    // the only thing that can throw here is a real network/server error.
+    let cancelled = false;
+    Promise.all([getLatestTest(), getOldestTest(), getUpcomingTest()])
+      .then(([l, o, u]) => {
+        if (cancelled) return;
+        setLatest(l);
+        setOldest(o);
+        setUpcoming(u);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Initial render before any of the three have resolved. Show a soft
+  // loading hint rather than flickering empty placeholders.
+  const stillLoading =
+    latest === undefined || oldest === undefined || upcoming === undefined;
+
+  return (
+    <div className="home">
+      <header className="home-header">
+        <h1>mybluebook</h1>
+        <p className="subtitle">Personal SAT-style practice tests</p>
+      </header>
+
+      {error && <p className="bad">Couldn't load tests: {error}</p>}
+
+      {/* The three primary cards. Empty-state placeholders stand in for
+          'latest' / 'oldest' when those slots don't exist yet. */}
+      <section className="cards-row">
+        <CompletedTestCard
+          label="Most recent"
+          test={latest}
+          loading={latest === undefined}
+        />
+        <CompletedTestCard
+          label="Previous"
+          test={oldest}
+          loading={oldest === undefined}
+        />
+        <CreateNewCard />
+      </section>
+
+      {/* Upcoming section. Per README §1 this is below the row of three.
+          If no test currently has status='upcoming' (common on a fresh DB
+          before the user has created one), just show a light hint. */}
+      <section className="upcoming-section">
+        <h2>Upcoming Test</h2>
+        {upcoming === undefined && stillLoading && (
+          <div className="upcoming-card loading">
+            <p>Loading…</p>
+          </div>
+        )}
+        {upcoming === null && (
+          <div className="upcoming-card empty">
+            <p>No upcoming test yet — create one to get started.</p>
+          </div>
+        )}
+        {upcoming && (
+          <div className="upcoming-card">
+            <div className="upcoming-meta">
+              <div className="upcoming-title">
+                Test #{upcoming.id}
+              </div>
+              <div className="upcoming-sub">
+                Created {formatDate(upcoming.created_at)} ·{' '}
+                {upcoming.questions?.length ?? '?'} questions
+              </div>
+            </div>
+            <button
+              className="primary"
+              onClick={() => navigate(`/take/${upcoming.id}`)}
+            >
+              Take It
+            </button>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Card for a completed test (latest or oldest).
+//
+//   - test === undefined  → still loading, show a muted placeholder
+//   - test === null       → no test in this slot, show a friendly empty
+//                           state (read-only, not a link)
+//   - test has a row      → real card, clickable, links to /review/:testId
+// ---------------------------------------------------------------------------
+function CompletedTestCard({ label, test, loading }) {
+  if (loading) {
+    return (
+      <div className="card card-loading">
+        <div className="card-label">{label}</div>
+        <div className="card-title">Loading…</div>
+      </div>
+    );
+  }
+
+  if (test === null) {
+    return (
+      <div className="card card-empty">
+        <div className="card-label">{label}</div>
+        <div className="card-title">No test yet</div>
+        <div className="card-sub">
+          Complete a test to populate this card.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <Link to={`/review/${test.id}`} className="card card-clickable">
+      <div className="card-label">{label}</div>
+      <div className="card-title">Test #{test.id}</div>
+      <div className="card-sub">Completed {formatDate(test.completed_at)}</div>
+    </Link>
+  );
+}
+
+// The "Create New Test" card. Always present, always clickable, navigates
+// to /create. Kept as its own component so the rendering rules above stay
+// readable.
+function CreateNewCard() {
+  return (
+    <Link to="/create" className="card card-create">
+      <div className="card-label">New</div>
+      <div className="card-title">Create New Test</div>
+      <div className="card-sub">Build a 4-module practice test.</div>
+    </Link>
+  );
+}
