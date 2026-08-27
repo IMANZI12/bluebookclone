@@ -49,6 +49,26 @@ async function postJson(path, body) {
   return res.json();
 }
 
+// Internal: do a JSON PATCH and return parsed JSON. Throws on non-2xx.
+async function patchJson(path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const errBody = await res.json();
+      detail = errBody.error || JSON.stringify(errBody);
+    } catch {
+      detail = res.statusText;
+    }
+    throw new Error(`PATCH ${path} failed: HTTP ${res.status} — ${detail}`);
+  }
+  return res.json();
+}
+
 // GET /api/tests/latest
 // Returns the test with status='latest' (the most recent completed test),
 // or null if no test currently has that status.
@@ -77,6 +97,16 @@ export function getUpcomingTest() {
 // question IDs for the follow-up image upload step.
 export function createTest(payload) {
   return postJson('/tests', payload);
+}
+
+// PATCH /api/questions/:id
+// Body: { provided_answer: "A" | "B" | "C" | "D" | null }
+// Used by the Take Test flow's debounced autosave on every option click.
+// Pass null to clear an answer.
+export function updateAnswer(questionId, providedAnswer) {
+  return patchJson(`/questions/${questionId}`, {
+    provided_answer: providedAnswer,
+  });
 }
 
 // POST /api/questions/:id/image
