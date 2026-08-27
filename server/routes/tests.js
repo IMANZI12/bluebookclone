@@ -147,13 +147,18 @@ router.post('/', async (req, res) => {
     // Insert all questions. A single multi-row INSERT is faster than 98 round
     // trips, but the question count is small enough that even per-row inserts
     // would be fine. We do per-row so the SQL stays easy to read.
+    // We also capture the inserted id+module+question_number from each row
+    // so the Create Test UI can map picked files to question IDs for the
+    // follow-up image-upload step (POST /api/questions/:id/image).
+    const insertedQuestions = [];
     for (const q of questions) {
-      await client.query(
+      const { rows: [inserted] } = await client.query(
         `INSERT INTO questions
            (test_id, module, question_number, description, image_path,
             specific_requirement, option_a, option_b, option_c, option_d,
             correct_answer)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id, module, question_number`,
         [
           testId,
           q.module,
@@ -168,6 +173,7 @@ router.post('/', async (req, res) => {
           q.correct_answer,
         ]
       );
+      insertedQuestions.push(inserted);
     }
 
     await client.query('COMMIT');
@@ -181,6 +187,7 @@ router.post('/', async (req, res) => {
         duration_minutes: m.duration_minutes,
       })),
       question_count: questions.length,
+      questions: insertedQuestions,
     });
   } catch (err) {
     await client.query('ROLLBACK');

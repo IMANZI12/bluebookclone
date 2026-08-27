@@ -29,6 +29,26 @@ async function getJson(path) {
   return res.json();
 }
 
+// Internal: do a JSON POST and return parsed JSON. Throws on non-2xx.
+async function postJson(path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const errBody = await res.json();
+      detail = errBody.error || JSON.stringify(errBody);
+    } catch {
+      detail = res.statusText;
+    }
+    throw new Error(`POST ${path} failed: HTTP ${res.status} — ${detail}`);
+  }
+  return res.json();
+}
+
 // GET /api/tests/latest
 // Returns the test with status='latest' (the most recent completed test),
 // or null if no test currently has that status.
@@ -48,4 +68,36 @@ export function getOldestTest() {
 // or null if no test currently has that status.
 export function getUpcomingTest() {
   return getJson('/tests/upcoming');
+}
+
+// POST /api/tests
+// Body: { modules: [{ duration_minutes: int } x4], questions: [98 entries] }.
+// Returns the created test row including a `questions` array of inserted
+// { id, module, question_number } so the client can map picked files to
+// question IDs for the follow-up image upload step.
+export function createTest(payload) {
+  return postJson('/tests', payload);
+}
+
+// POST /api/questions/:id/image
+// multipart/form-data with the file under field name "image". Returns
+// { id, image_path } on success.
+export async function uploadQuestionImage(questionId, file) {
+  const fd = new FormData();
+  fd.append('image', file);
+  const res = await fetch(`${BASE}/questions/${questionId}/image`, {
+    method: 'POST',
+    body: fd, // no Content-Type header — the browser sets the multipart boundary.
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const errBody = await res.json();
+      detail = errBody.error || JSON.stringify(errBody);
+    } catch {
+      detail = res.statusText;
+    }
+    throw new Error(`POST /questions/${questionId}/image failed: HTTP ${res.status} — ${detail}`);
+  }
+  return res.json();
 }

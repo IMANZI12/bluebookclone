@@ -194,3 +194,273 @@ code {
   border-radius: 4px;
   font-size: 0.9em;
 }
+
+/* -------------------------------------------------------------------------
+ * Create Test wizard (Phase 5)
+ * ----------------------------------------------------------------------- */
+.create-test .ct-header {
+  margin-bottom: 16px;
+}
+
+.create-test .ct-error {
+  margin-top: 16px;
+}
+
+/* Stepper row: six numbered labels across the top. Past steps are buttons,
+ * current step is highlighted, future steps are dimmed and unclickable. */
+.stepper {
+  list-style: none;
+  margin: 0 0 24px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.stepper-item {
+  flex: 0 0 auto;
+}
+.stepper-button {
+  appearance: none;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: #555;
+  font-family: inherit;
+}
+.stepper-past .stepper-button {
+  border-color: #b5c8ff;
+  color: #2d6cdf;
+}
+.stepper-active .stepper-button {
+  background: #2d6cdf;
+  border-color: #2d6cdf;
+  color: #fff;
+}
+.stepper-disabled {
+  cursor: default;
+  color: #aaa;
+}
+
+/* Module step header. */
+.ct-module-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.ct-progress {
+  font-size: 0.9rem;
+  color: #666;
+}
+
+/* Per-question slot. */
+.question-form {
+  border: 1px solid #e3e3e3;
+  border-radius: 10px;
+  background: #fafbfc;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.question-form-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+.q-label {
+  font-weight: 600;
+}
+.q-missing {
+  font-size: 0.8rem;
+  color: #b00020;
+}
+
+/* Field primitives. */
+.field {
+  display: block;
+  margin-bottom: 10px;
+}
+.field-label {
+  display: block;
+  font-size: 0.8rem;
+  color: #666;
+  margin-bottom: 4px;
+}
+.field input[type='text'],
+.field input[type='number'],
+.field textarea,
+.answer-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  background: #fff;
+}
+.field textarea {
+  resize: vertical;
+  min-height: 56px;
+}
+.field input:focus,
+.field textarea:focus,
+.answer-input:focus {
+  outline: none;
+  border-color: #2d6cdf;
+  box-shadow: 0 0 0 2px rgba(45, 108, 223, 0.15);
+}
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.field-inline .field-label {
+  margin: 0;
+  min-width: 100px;
+}
+.field-inline .answer-input {
+  width: 64px;
+}
+.answer-input.invalid {
+  border-color: #b00020;
+  box-shadow: 0 0 0 2px rgba(176, 0, 32, 0.1);
+}
+.field-error {
+  color: #b00020;
+  font-size: 0.85rem;
+}
+.file-hint {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 0.85rem;
+  color: #666;
+}
+.link-button {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: #2d6cdf;
+  cursor: pointer;
+  font-size: inherit;
+  text-decoration: underline;
+  padding: 0;
+  font-family: inherit;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+@media (max-width: 600px) {
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Durations step. */
+.ct-durations .duration-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  max-width: 600px;
+}
+@media (max-width: 720px) {
+  .ct-durations .duration-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Review step. */
+.ct-review-total {
+  font-size: 1.1rem;
+  margin-bottom: 12px;
+}
+.ct-review-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 24px;
+}
+@media (max-width: 720px) {
+  .ct-review-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.ct-review-module {
+  border: 1px solid #e3e3e3;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.ct-review-module.is-complete {
+  border-color: #b6e0b6;
+  background: #f3fbf3;
+}
+.ct-review-module-title {
+  font-size: 0.8rem;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ct-review-module-stat {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 4px 0 6px;
+}
+.ct-review-durations {
+  list-style: disc;
+  padding-left: 24px;
+  color: #444;
+}
+.ct-missing-list {
+  list-style: disc;
+  padding-left: 24px;
+  color: #b00020;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #f3c4c4;
+  background: #fff5f5;
+  border-radius: 8px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.ct-review-hint {
+  margin-top: 16px;
+  color: #555;
+}
+.ok {
+  color: #1e7a1e;
+}
+
+/* Footer with Back / Next / Create Test. */
+.ct-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 24px;
+}
+button.secondary {
+  appearance: none;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  color: #333;
+  font-size: 1rem;
+  font-weight: 500;
+  padding: 10px 22px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+}
+button.secondary:hover {
+  border-color: #999;
+}
+button.secondary:disabled,
+button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
