@@ -930,3 +930,161 @@ button.primary:disabled {
   color: #b00020;
   font-size: 0.85rem;
 }
+
+/* -------------------------------------------------------------------------
+ * Review view (Phase 7)
+ *
+ * Read-only display of a completed test. Re-uses the .tt-split /
+ * .tt-options / .tt-option classes from the Take Test view for the
+ * question + option shells so the layout stays consistent, but the
+ * review-specific chrome (header, tabs, stat strip, per-question block)
+ * lives in its own .rv-* namespace below. Highlight modifiers
+ * (.is-correct / .is-wrong / .is-omitted) are applied directly to the
+ * .tt-option element.
+ * ----------------------------------------------------------------------- */
+.review {
+  background: #fff;
+  border: 1px solid #e3e3e3;
+  border-radius: 10px;
+  padding: 24px 28px 32px;
+}
+
+/* Header strip: title + completed date on the left, Back link on the right. */
+.rv-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.rv-header h1 {
+  margin: 0 0 4px;
+}
+.rv-header .subtitle {
+  margin: 0;
+}
+
+/* Module tab bar — same visual language as .tt-module-tab but its own
+ * class so the TakeTest tabs aren't affected by review-only tweaks. */
+.rv-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #e3e3e3;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+}
+.rv-tab {
+  appearance: none;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  color: #555;
+  font-family: inherit;
+}
+.rv-tab:hover {
+  border-color: #b5c8ff;
+}
+.rv-tab.is-active {
+  background: #2d6cdf;
+  border-color: #2d6cdf;
+  color: #fff;
+}
+.rv-tab:disabled {
+  cursor: default;
+  color: #aaa;
+  background: #fafafa;
+}
+.rv-tab-count {
+  font-weight: 400;
+  opacity: 0.85;
+}
+
+/* Per-module roll-up counts above the question list. */
+.rv-mod-stats {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  color: #555;
+  margin-bottom: 20px;
+  padding: 8px 12px;
+  background: #fafbfc;
+  border: 1px solid #e3e3e3;
+  border-radius: 8px;
+}
+.rv-stat {
+  font-variant-numeric: tabular-nums;
+}
+.rv-stat-correct { color: #1e7a1e; }
+.rv-stat-wrong   { color: #b00020; }
+.rv-stat-omitted { color: #b46a00; }
+.rv-stat-total   { color: #666; margin-left: auto; }
+
+/* Vertical list of questions for the active module. */
+.rv-module {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.rv-question {
+  border: 1px solid #e3e3e3;
+  border-radius: 10px;
+  padding: 18px 20px;
+  background: #fafbfc;
+}
+.rv-q-num {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+  margin-bottom: 10px;
+}
+
+/* Per-option highlight modifiers applied to the .tt-option element.
+ * Tinted background + colored border; small inline tag inside the
+ * option row indicates the verdict. Neutral options are untouched. */
+.tt-option.is-correct {
+  background: #eaf6ea;
+  border-color: #4caf50;
+  box-shadow: inset 0 0 0 1px #4caf50;
+}
+.tt-option.is-correct .tt-option-letter {
+  color: #1e7a1e;
+}
+.tt-option.is-wrong {
+  background: #fdecec;
+  border-color: #d04545;
+  box-shadow: inset 0 0 0 1px #d04545;
+}
+.tt-option.is-wrong .tt-option-letter {
+  color: #b00020;
+}
+.tt-option.is-omitted {
+  background: #fff3e0;
+  border-color: #e08a2a;
+  box-shadow: inset 0 0 0 1px #e08a2a;
+}
+.tt-option.is-omitted .tt-option-letter {
+  color: #b46a00;
+}
+
+/* The verdict label inside an option. Sits to the right of the text. */
+.rv-tag {
+  margin-left: auto;
+  padding-left: 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tt-option.is-correct .rv-tag { color: #1e7a1e; }
+.tt-option.is-wrong   .rv-tag { color: #b00020; }
+.tt-option.is-omitted .rv-tag { color: #b46a00; }

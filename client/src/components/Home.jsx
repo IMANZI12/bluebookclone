@@ -81,11 +81,13 @@ export default function Home() {
       <section className="cards-row">
         <CompletedTestCard
           label="Most recent"
+          status="latest"
           test={latest}
           loading={latest === undefined}
         />
         <CompletedTestCard
           label="Previous"
+          status="oldest"
           test={oldest}
           loading={oldest === undefined}
         />
@@ -126,7 +128,7 @@ export default function Home() {
 //                           state (read-only, not a link)
 //   - test has a row      → real card, clickable, links to /review/:testId
 // ---------------------------------------------------------------------------
-function CompletedTestCard({ label, test, loading }) {
+function CompletedTestCard({ label, status, test, loading }) {
   if (loading) {
     return (
       <div className="card card-loading">
@@ -148,8 +150,11 @@ function CompletedTestCard({ label, test, loading }) {
     );
   }
 
+  // Phase 7: link to /review/:status (latest|oldest) instead of the
+  // test's numeric id, so Review can re-use the existing
+  // getLatestTest() / getOldestTest() helpers without a new endpoint.
   return (
-    <Link to={`/review/${test.id}`} className="card card-clickable">
+    <Link to={`/review/${status}`} className="card card-clickable">
       <div className="card-label">{label}</div>
       <div className="card-title">Test #{test.id}</div>
       <div className="card-sub">Completed {formatDate(test.completed_at)}</div>
