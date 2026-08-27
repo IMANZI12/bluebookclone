@@ -362,14 +362,20 @@ code {
   }
 }
 
-/* Durations step. */
+/* Durations step. Phase 6 pass 2: 5 inputs (4 modules + 1 break) so
+ * the grid drops to 3 columns on desktop, 2 on narrow screens. */
 .ct-durations .duration-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
-  max-width: 600px;
+  max-width: 760px;
 }
-@media (max-width: 720px) {
+@media (max-width: 860px) {
+  .ct-durations .duration-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 560px) {
   .ct-durations .duration-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -744,26 +750,179 @@ button.primary:disabled {
   border-color: #2d6cdf;
 }
 
-/* Module-2 "Next module" placeholder control. In pass 2 this becomes a
- * timer-driven auto-progression. For now it's a small button that lets us
- * flip modules by hand for testing. */
-.tt-mod-next {
+/* Module-2 "Next module" placeholder control was removed in pass 2 —
+ * the test now auto-progresses via the state machine. Styles kept here
+ * briefly as a marker; safe to delete next pass. */
+
+/* -------------------------------------------------------------------------
+ * Take Test — Phase 6 pass 2: timer, pause button, overlay, break view
+ * ----------------------------------------------------------------------- */
+
+/* Header right-hand area: phase label + mm:ss clock + pause control. */
+.tt-timer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.tt-timer-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.1;
+}
+.tt-timer-label {
+  font-size: 0.75rem;
+  color: #777;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.tt-timer-clock {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #222;
+  /* The "polite" live region lets screen readers announce the countdown
+   * every minute (default polite cadence); not too chatty. */
+}
+.tt-pause-btn {
   appearance: none;
   border: 1px solid #d0d0d0;
   background: #fff;
   color: #333;
-  font-size: 0.8rem;
-  padding: 4px 10px;
-  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 8px;
   cursor: pointer;
   font-family: inherit;
 }
-.tt-mod-next:hover {
-  border-color: #999;
+.tt-pause-btn:hover {
+  border-color: #2d6cdf;
+  color: #2d6cdf;
 }
-.tt-mod-next:disabled {
-  opacity: 0.4;
+.tt-pause-btn.is-paused {
+  background: #2d6cdf;
+  border-color: #2d6cdf;
+  color: #fff;
+}
+.tt-pause-btn.is-paused:hover {
+  background: #2257b8;
+  color: #fff;
+}
+/* .is-disabled is for the "Break" / "Saving…" chips. Not clickable. */
+.tt-pause-btn.is-disabled {
   cursor: default;
+  background: #f5f6f8;
+  color: #888;
+  border-color: #e3e3e3;
+}
+.tt-pause-btn.is-disabled:hover {
+  border-color: #e3e3e3;
+  color: #888;
+}
+
+/* Full-screen pause overlay. Bold yellow with a centered Play button.
+ * Renders only when phase === 'paused'. */
+.tt-pause-overlay {
+  position: fixed;
+  inset: 0;
+  background: #ffd60a;          /* bold yellow, per README §4 */
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+.tt-pause-overlay-play {
+  appearance: none;
+  border: 0;
+  background: #fff;
+  color: #1a1a1a;
+  font-size: 1.5rem;
+  font-weight: 700;
+  padding: 22px 44px;
+  border-radius: 14px;
+  cursor: pointer;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  transition: transform 0.1s;
+}
+.tt-pause-overlay-play:hover {
+  transform: translateY(-1px);
+}
+.tt-pause-overlay-icon {
+  font-size: 1.8rem;
+  line-height: 1;
+}
+.tt-pause-overlay-text {
+  font-size: 1.5rem;
+}
+
+/* Break view: hides the question content and shows a calm "10 minute
+ * break" card. Renders only when phase === 'break'. */
+.tt-break-view {
+  max-width: 540px;
+  margin: 64px auto;
+  text-align: center;
+  padding: 32px;
+  background: #fafbfc;
+  border: 1px solid #e3e3e3;
+  border-radius: 12px;
+}
+.tt-break-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 0 0 6px;
+}
+.tt-break-clock {
+  font-size: 3rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin: 12px 0 8px;
+  color: #2d6cdf;
+}
+.tt-break-hint {
+  color: #666;
+  font-size: 0.95rem;
+}
+
+/* Saving / completion view. Centered card with a spinner-ish label. */
+.tt-saving-view {
+  max-width: 540px;
+  margin: 80px auto;
+  text-align: center;
+  padding: 32px;
+}
+.tt-saving-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 0 0 8px;
+}
+.tt-saving-sub {
+  color: #666;
+}
+.tt-saving-error {
+  margin-top: 16px;
+  color: #b00020;
+}
+.tt-saving-retry {
+  margin-top: 12px;
+  appearance: none;
+  border: 0;
+  background: #2d6cdf;
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.tt-saving-retry:hover {
+  background: #2257b8;
 }
 
 .upcoming-error {

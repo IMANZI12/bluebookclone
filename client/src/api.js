@@ -131,3 +131,34 @@ export async function uploadQuestionImage(questionId, file) {
   }
   return res.json();
 }
+
+// Phase 6 pass 2: server-anchored module/break timer endpoints.
+//
+// All four wrappers return the full server row so the client can
+// immediately re-hydrate its state machine without a follow-up GET.
+// They are designed to be idempotent on the server side: calling start
+// twice in a row doesn't reset the clock, calling pause when already
+// paused is a no-op, etc. So callers don't have to be defensive about
+// double-firing the same action.
+
+// POST /api/modules/:testId/:moduleId/start
+export function startModule(testId, moduleId) {
+  return postJson(`/modules/${testId}/${moduleId}/start`);
+}
+
+// PATCH /api/modules/:testId/:moduleId/pause
+export function pauseModule(testId, moduleId) {
+  return patchJson(`/modules/${testId}/${moduleId}/pause`, {});
+}
+
+// PATCH /api/modules/:testId/:moduleId/resume
+export function resumeModule(testId, moduleId) {
+  return patchJson(`/modules/${testId}/${moduleId}/resume`, {});
+}
+
+// POST /api/tests/:testId/break/start
+// The break is not pausable, so there is intentionally no pauseBreak
+// or resumeBreak.
+export function startBreak(testId) {
+  return postJson(`/tests/${testId}/break/start`);
+}

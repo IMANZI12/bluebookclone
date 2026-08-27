@@ -8,6 +8,7 @@ const cors = require('cors');
 
 const testsRouter = require('./routes/tests');
 const questionsRouter = require('./routes/questions');
+const modulesRouter = require('./routes/modules');
 
 const app = express();
 app.use(cors());
@@ -19,6 +20,9 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/tests', testsRouter);
 app.use('/api/questions', questionsRouter);
+// Modules are addressed as /api/modules/:testId/:moduleId/{start|pause|resume}.
+// The router uses mergeParams so it can read both URL params.
+app.use('/api/modules', modulesRouter);
 
 // Phase 5: serve uploaded question images as static files. Path stored in
 // questions.image_path is something like "/uploads/3/12-1700000000.jpg", and

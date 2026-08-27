@@ -48,7 +48,7 @@ const VALID_ANSWERS = new Set(['A', 'B', 'C', 'D']);
 // question rows. Whole thing is one transaction.
 // ---------------------------------------------------------------------------
 router.post('/', async (req, res) => {
-  const { modules, questions } = req.body || {};
+  const { modules, questions, break_minutes } = req.body || {};
 
   // --- Pre-flight validation. We do this BEFORE opening a transaction so a
   // malformed payload never even starts a DB round-trip. -------------------
@@ -60,11 +60,35 @@ router.post('/', async (req, res) => {
   for (let i = 0; i < 4; i++) {
     const m = modules[i];
     const moduleNum = i + 1;
-    if (!m || !Number.isInteger(m.duration_minutes) || m.duration_minutes <= 0) {
+    // duration_minutes is a positive number (any positive finite). The
+    // column is numeric(8,3) so fractional minutes (e.g. 0.1 for testing)
+    // are accepted. NaN/Infinity/0/negatives all fail.
+    if (
+      !m ||
+      typeof m.duration_minutes !== 'number' ||
+      !Number.isFinite(m.duration_minutes) ||
+      m.duration_minutes <= 0
+    ) {
       return res.status(400).json({
-        error: `Module ${moduleNum} is missing a positive integer duration_minutes.`,
+        error: `Module ${moduleNum} is missing a positive duration_minutes.`,
       });
     }
+  }
+
+  // break_minutes: optional. If present must be a positive finite number.
+  // Default to 10 (the schema default) when absent.
+  let breakMinutes = 10;
+  if (break_minutes !== undefined) {
+    if (
+      typeof break_minutes !== 'number' ||
+      !Number.isFinite(break_minutes) ||
+      break_minutes <= 0
+    ) {
+      return res.status(400).json({
+        error: 'break_minutes, if provided, must be a positive number.',
+      });
+    }
+    breakMinutes = break_minutes;
   }
 
   if (!Array.isArray(questions)) {
@@ -133,16 +157,27 @@ router.post('/', async (req, res) => {
     const testId = test.id;
 
     // Insert 4 module rows. The migration makes (test_id, id) the PK with id
-    // constrained to 1..4, so we hard-code those here.
+    // constrained to 1..4, so we hard-code those here. duration_minutes
+    // is numeric(8,3); the $4::numeric cast makes pg accept a JS number
+    // (pg would otherwise send it as int8 for integer-typed columns).
     for (let i = 0; i < 4; i++) {
       const moduleNum = i + 1;
       const { duration_minutes } = modules[i];
       await client.query(
         `INSERT INTO modules (id, test_id, name, duration_minutes)
-         VALUES ($1, $2, $3, $4)`,
+         VALUES ($1, $2, $3, $4::numeric)`,
         [moduleNum, testId, `Module ${moduleNum}`, duration_minutes]
       );
     }
+
+    // Insert the break row. There is exactly one break per test; its PK
+    // is test_id. started_at stays NULL until the user reaches module 2's
+    // end and the client posts to /api/tests/:id/break/start.
+    await client.query(
+      `INSERT INTO breaks (test_id, duration_minutes)
+       VALUES ($1, $2::numeric)`,
+      [testId, breakMinutes]
+    );
 
     // Insert all questions. A single multi-row INSERT is faster than 98 round
     // trips, but the question count is small enough that even per-row inserts
@@ -186,6 +221,7 @@ router.post('/', async (req, res) => {
         id: i + 1,
         duration_minutes: m.duration_minutes,
       })),
+      break_minutes: breakMinutes,
       question_count: questions.length,
       questions: insertedQuestions,
     });
@@ -227,7 +263,8 @@ router.get('/:status', async (req, res) => {
     const test = tests[0];
 
     const { rows: modules } = await pool.query(
-      `SELECT id, name, duration_minutes
+      `SELECT id, name, duration_minutes,
+              module_started_at, paused_at, accumulated_pause_seconds
          FROM modules
         WHERE test_id = $1
         ORDER BY id ASC`,
@@ -244,7 +281,17 @@ router.get('/:status', async (req, res) => {
       [test.id]
     );
 
-    res.json({ ...test, modules, questions });
+    // Pull the break row too (or null if it doesn't exist). Phase 6 pass 2
+    // uses this to compute break remaining time on a refresh mid-break.
+    const { rows: breakRows } = await pool.query(
+      `SELECT test_id, duration_minutes, started_at
+         FROM breaks
+        WHERE test_id = $1`,
+      [test.id]
+    );
+    const breakRow = breakRows[0] ?? null;
+
+    res.json({ ...test, modules, questions, break: breakRow });
   } catch (err) {
     console.error(`GET /api/tests/${status} failed:`, err.message);
     res.status(500).json({ error: 'Failed to fetch test', detail: err.message });
@@ -312,6 +359,46 @@ router.post('/upcoming/complete', async (_req, res) => {
     res.status(500).json({ error: 'Failed to complete test', detail: err.message });
   } finally {
     client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/tests/:testId/break/start
+// Phase 6 pass 2: stamps started_at on the test's break row. Idempotent —
+// a repeat call (e.g. after a refresh mid-break) leaves started_at alone.
+// The break is NOT pausable, so we don't ship pause/resume handlers for it.
+// ---------------------------------------------------------------------------
+router.post('/:testId/break/start', async (req, res) => {
+  const testId = Number(req.params.testId);
+  if (!Number.isInteger(testId) || testId <= 0) {
+    return res.status(400).json({ error: 'testId must be a positive integer.' });
+  }
+
+  try {
+    // Verify the test exists. The break row has a FK to tests(id), so an
+    // INSERT would fail anyway with a constraint violation, but checking
+    // first lets us return a cleaner 404 instead of a generic 500.
+    const { rows: t } = await pool.query('SELECT id FROM tests WHERE id = $1', [testId]);
+    if (t.length === 0) {
+      return res.status(404).json({ error: `No test with id=${testId}.` });
+    }
+
+    // Upsert the break row. Like modules.start, only stamp started_at if
+    // it's currently NULL — refreshes mid-break should not reset the clock.
+    // The COALESCE in the DO UPDATE clause means an existing non-null
+    // started_at is preserved; a NULL (or missing) row gets now().
+    const { rows } = await pool.query(
+      `INSERT INTO breaks (test_id, started_at)
+       VALUES ($1, now())
+       ON CONFLICT (test_id) DO UPDATE
+         SET started_at = COALESCE(breaks.started_at, EXCLUDED.started_at)
+       RETURNING test_id, duration_minutes, started_at`,
+      [testId]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(`POST /api/tests/${testId}/break/start failed:`, err.message);
+    res.status(500).json({ error: 'Failed to start break', detail: err.message });
   }
 });
 

@@ -106,8 +106,14 @@ export default function CreateTest() {
   const [step, setStep] = useState(1);
 
   // Per-module durations. Defaults are typical SAT-ish values so the form
-  // is usable out of the box; user can edit on step 5.
+  // is usable out of the box; user can edit on step 5. Phase 6 pass 2:
+  // these accept fractional minutes (e.g. 0.1 = 6s) so the test flow can
+  // be verified end-to-end without sitting through full module durations.
   const [durations, setDurations] = useState([32, 32, 35, 35]);
+
+  // Break duration in minutes. Phase 6 pass 2: a fifth input on the
+  // Durations step. Default 10 (the SAT break length).
+  const [breakMinutes, setBreakMinutes] = useState(10);
 
   // All 98 question slots. Built once via lazy initializer.
   const [questions, setQuestions] = useState(initQuestions);
@@ -147,13 +153,15 @@ export default function CreateTest() {
     return { perModule, totalComplete };
   }, [questions]);
 
-  // True iff all 98 questions are complete AND every duration is a
-  // positive integer. Review step's submit button is disabled when this
-  // is false.
+  // True iff all 98 questions are complete AND every duration (modules +
+  // break) is a positive number. Review step's submit button is disabled
+  // when this is false. Fractional durations are allowed (e.g. 0.1 for
+  // short test runs), so we only check Number.isFinite and > 0.
   const allComplete = useMemo(() => {
     if (validation.totalComplete !== 98) return false;
-    return durations.every((d) => Number.isInteger(d) && d > 0);
-  }, [validation, durations]);
+    if (!Number.isFinite(breakMinutes) || breakMinutes <= 0) return false;
+    return durations.every((d) => Number.isFinite(d) && d > 0);
+  }, [validation, durations, breakMinutes]);
 
   // Flatten the missing-fields-per-question into the human-readable lines
   // for the Review step, e.g. "Module 2, Question 14: missing option C,
@@ -171,12 +179,19 @@ export default function CreateTest() {
     return lines;
   }, [validation]);
 
-  // Step 5 validation: every duration must be a positive integer.
+  // Step 5 validation: every duration (modules + break) must be a positive
+  // number. Fractional minutes are allowed so this can be e.g. 0.1 (6s)
+  // for end-to-end testing.
   const durationErrors = useMemo(() => {
-    return durations.map((d, i) =>
-      Number.isInteger(d) && d > 0 ? null : `Module ${i + 1} duration must be a positive integer.`
+    const moduleErrors = durations.map((d, i) =>
+      Number.isFinite(d) && d > 0 ? null : `Module ${i + 1} duration must be a positive number.`
     );
-  }, [durations]);
+    const breakError =
+      Number.isFinite(breakMinutes) && breakMinutes > 0
+        ? null
+        : 'Break duration must be a positive number.';
+    return { modules: moduleErrors, break: breakError };
+  }, [durations, breakMinutes]);
 
   async function handleSubmit() {
     if (!allComplete || submitting) return;
@@ -185,8 +200,11 @@ export default function CreateTest() {
 
     // Build the JSON payload the server expects. Note image_path is null
     // for every question; the actual files go up in a second pass.
+    // break_minutes is included so the test's per-test break length is
+    // stored on the new breaks row at creation time.
     const payload = {
       modules: durations.map((d) => ({ duration_minutes: d })),
+      break_minutes: breakMinutes,
       questions: [],
     };
     for (const m of MODULES) {
@@ -282,18 +300,21 @@ export default function CreateTest() {
       {step === 5 && (
         <DurationsStep
           durations={durations}
+          breakMinutes={breakMinutes}
           errors={durationErrors}
-          onChange={(i, v) => {
+          onChangeModule={(i, v) => {
             const next = [...durations];
             next[i] = v;
             setDurations(next);
           }}
+          onChangeBreak={setBreakMinutes}
         />
       )}
 
       {step === 6 && (
         <ReviewStep
           durations={durations}
+          breakMinutes={breakMinutes}
           validation={validation}
           allComplete={allComplete}
           missingLines={missingLines}
@@ -512,16 +533,17 @@ function QuestionForm({ moduleNum, qNum, value, missing, onChange }) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: per-module durations. Number input per module; we coerce the
-// onChange value to either a positive integer or 0 (which the validation
-// step will then flag as missing) so the state shape stays predictable.
+// Step 5: per-module durations plus the break duration. Number inputs;
+// we accept decimals (e.g. 0.1 = 6 seconds) so the test flow can be
+// verified end-to-end in ~30s. The min/step matches the input precision.
 // ---------------------------------------------------------------------------
-function DurationsStep({ durations, errors, onChange }) {
+function DurationsStep({ durations, breakMinutes, errors, onChangeModule, onChangeBreak }) {
   return (
     <section className="ct-durations">
       <h2>Module Durations</h2>
       <p className="subtitle">
-        How long, in minutes, should each module's timer be set to?
+        How long, in minutes, should each module's timer be set to? Decimals
+        are allowed (e.g. <code>0.1</code> = 6 seconds) for fast testing.
       </p>
       <div className="duration-grid">
         {durations.map((d, i) => (
@@ -529,19 +551,35 @@ function DurationsStep({ durations, errors, onChange }) {
             <span className="field-label">Module {i + 1} (minutes)</span>
             <input
               type="number"
-              min={1}
-              step={1}
+              min={0.01}
+              step={0.01}
               value={Number.isFinite(d) ? d : ''}
               onChange={(e) => {
                 const raw = e.target.value;
-                if (raw === '') return onChange(i, 0);
-                const n = parseInt(raw, 10);
-                onChange(i, Number.isFinite(n) ? n : 0);
+                if (raw === '') return onChangeModule(i, 0);
+                const n = parseFloat(raw);
+                onChangeModule(i, Number.isFinite(n) ? n : 0);
               }}
             />
-            {errors[i] && <span className="field-error">{errors[i]}</span>}
+            {errors.modules[i] && <span className="field-error">{errors.modules[i]}</span>}
           </label>
         ))}
+        <label className="field">
+          <span className="field-label">Break (minutes)</span>
+          <input
+            type="number"
+            min={0.01}
+            step={0.01}
+            value={Number.isFinite(breakMinutes) ? breakMinutes : ''}
+            onChange={(e) => {
+              const raw = e.target.value;
+              if (raw === '') return onChangeBreak(0);
+              const n = parseFloat(raw);
+              onChangeBreak(Number.isFinite(n) ? n : 0);
+            }}
+          />
+          {errors.break && <span className="field-error">{errors.break}</span>}
+        </label>
       </div>
     </section>
   );
@@ -552,7 +590,7 @@ function DurationsStep({ durations, errors, onChange }) {
 // full missing-fields list. Each module summary has a "Jump to module N"
 // button to take the user back to fix the listed problems.
 // ---------------------------------------------------------------------------
-function ReviewStep({ durations, validation, allComplete, missingLines, onJumpToModule }) {
+function ReviewStep({ durations, breakMinutes, validation, allComplete, missingLines, onJumpToModule }) {
   return (
     <section className="ct-review">
       <h2>Review</h2>
@@ -582,11 +620,12 @@ function ReviewStep({ durations, validation, allComplete, missingLines, onJumpTo
         })}
       </div>
 
-      <h3>Module Durations</h3>
+      <h3>Module &amp; Break Durations</h3>
       <ul className="ct-review-durations">
         {durations.map((d, i) => (
           <li key={i}>Module {i + 1}: {d} minutes</li>
         ))}
+        <li>Break: {breakMinutes} minutes</li>
       </ul>
 
       {missingLines.length > 0 ? (

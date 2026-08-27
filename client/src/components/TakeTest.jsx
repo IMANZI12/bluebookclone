@@ -1,100 +1,100 @@
-// TakeTest — Phase 6 pass 1.
+// TakeTest — Phase 6 pass 2.
 //
-// What this pass covers:
-//   - Preload on entry: the test is fetched and preloaded on the Home
-//     page's "Take It" click, then passed in via router state, so by the
-//     time this component mounts everything (questions, options, images)
-//     is already in hand. We render a fallback fetch only if the user
-//     lands on /take/:id directly (refresh, deep link).
-//   - LHS/RHS layout for modules 1 & 2; single-column for 3 & 4.
-//   - Footer: Back / Next buttons on the right; a "Question X of Y"
-//     control that opens a drop-up grid for the current module, with
-//     answered vs. unanswered cells styled differently.
-//   - Answer autosave: every click on A/B/C/D PATCHes
-//     /api/questions/:id with the new provided_answer, debounced by
-//     ~500ms per question so a quick burst of clicks doesn't fire four
-//     requests.
+// What this pass adds on top of pass 1:
+//   - Header countdown + pause button, both server-anchored via the
+//     /api/modules/:testId/:moduleId/{start,pause,resume} endpoints.
+//   - Auto-progression: when a module's timer hits 0, we POST to start
+//     the next module (or the break) and dispatch MODULE_DONE / BREAK_DONE.
+//   - A 10-minute (configurable per-test) break between module 2 and 3.
+//     The break is NOT pausable.
+//   - On module 4 completion: a brief "Saving…" view, then
+//     POST /api/tests/upcoming/complete to run the rotation, then
+//     navigate to "/" so the user lands on the rotated Home page.
 //
-// What this pass DELIBERATELY does NOT cover (pass 2 next prompt):
-//   - Header countdown timer
-//   - Pause / resume with the yellow overlay
-//   - Module auto-progression when a timer hits zero
-//   - The 10-minute break between modules 2 and 3
-//   - Rotation on module 4 completion
-// Module switching for now is a manual "next module" button in the
-// header so we can test the layout end-to-end.
+// What drives all of this is the useReducer state machine in
+// client/src/lib/testMachine.js. The component is otherwise the same as
+// pass 1 (preload-on-entry, layout, question grid, autosave).
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { getUpcomingTest, updateAnswer } from '../api.js';
+import {
+  getUpcomingTest,
+  updateAnswer,
+  startModule,
+  pauseModule,
+  resumeModule,
+  startBreak,
+} from '../api.js';
+import {
+  initialMachineState,
+  testMachineReducer,
+  computeRemaining,
+  formatMmSs,
+} from '../lib/testMachine.js';
+import TakeTestTimer from './TakeTestTimer.jsx';
+import PauseOverlay from './PauseOverlay.jsx';
 
 const MODULES = [1, 2, 3, 4];
 
-// One debounced PATCH per question. We keep a single timer per question ID
-// in a ref-map so concurrent clicks on the same question coalesce instead
-// of stacking timers. The map lives outside the component so it persists
-// across re-renders but resets whenever React unmounts the component
-// (which is fine — we're done with it).
-const debounceTimers = new Map();
+// How often we re-derive "remaining" from server timestamps and re-render
+// the header. 500ms is enough granularity to look smooth (the displayed
+// MM:SS only changes at whole-second boundaries anyway) and cheap.
+const TICK_MS = 500;
 
-// Fire-and-forget PATCH after a short delay. If another click on the same
-// question lands before the timer expires, the previous call is cancelled
-// and a new one is scheduled — only the final value in the burst is sent.
+// ---------------------------------------------------------------------------
+// Per-question debounced autosave. Same as pass 1 — kept outside the
+// component so the timer map survives re-renders.
+// ---------------------------------------------------------------------------
+const debounceTimers = new Map();
 function scheduleAutosave(questionId, letter) {
   const existing = debounceTimers.get(questionId);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
     debounceTimers.delete(questionId);
     updateAnswer(questionId, letter).catch((err) => {
-      // Surface autosave failures in the console; the in-memory answer is
-      // still correct, so we don't show a modal — the next save attempt
-      // will overwrite or the user will see stale data on refresh.
       console.error(`Autosave for question ${questionId} failed:`, err.message);
     });
   }, 500);
   debounceTimers.set(questionId, timer);
 }
 
+// Flush all pending autosaves immediately is handled inline in
+// runCompletion below — we need access to the latest answers map,
+// which is held in a ref there.
+
 export default function TakeTest() {
   const { testId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
 
-  // The test object passed from Home.jsx via router state. If absent (e.g.
-  // user refreshed or hit the URL directly) we fetch it ourselves so the
-  // route is still usable.
+  // Test payload passed via router state from Home. Fall back to a fetch
+  // if the user refreshed or deep-linked into /take/:testId.
   const passedTest = location.state?.test;
-
   const [test, setTest] = useState(passedTest ?? null);
-  const [loadError, setLoadError] = useState(passedTest ? null : null);
+  const [loadError, setLoadError] = useState(null);
 
-  // Current module + current question inside that module.
-  const [moduleNum, setModuleNum] = useState(1);
-  const [questionNum, setQuestionNum] = useState(1);
-
-  // Whether the question-grid drop-up is open.
-  const [gridOpen, setGridOpen] = useState(false);
-
-  // In-memory answer map: { [questionId]: "A" | "B" | "C" | "D" | null }.
-  // We seed it from the test payload (which carries any previously saved
-  // provided_answer values) so the user can resume after a refresh.
+  // Answer map, seeded from the test payload so refresh resumes cleanly.
   const [answers, setAnswers] = useState(() => {
     const out = {};
-    const questions = passedTest?.questions ?? [];
-    for (const q of questions) out[q.id] = q.provided_answer ?? null;
+    for (const q of passedTest?.questions ?? []) out[q.id] = q.provided_answer ?? null;
     return out;
   });
 
-  // Fallback fetch: only when the user didn't come in via "Take It".
+  // Reducer-driven state machine. Lazy init so we don't recompute the
+  // initial state on every render.
+  const [machine, dispatch] = useReducer(testMachineReducer, undefined, initialMachineState);
+
+  // Used to compute "remaining" — re-rendered every TICK_MS. We store it
+  // as state (not derived in render) so React schedules a re-render each
+  // tick. The reducer stays pure.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // --- Fallback fetch when the user didn't come in via "Take It" --------
   useEffect(() => {
     if (test) return;
     let cancelled = false;
     (async () => {
       try {
-        // We don't really know whether this test is the upcoming one or a
-        // different one, but in practice the only entry to /take/:id is
-        // via "Take It" on the Home page. If a future deep link points
-        // somewhere else, this will be the right call site to extend.
         const t = await getUpcomingTest();
         if (cancelled) return;
         if (!t) {
@@ -109,46 +109,252 @@ export default function TakeTest() {
         if (!cancelled) setLoadError(e.message || String(e));
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [test]);
 
-  // When the test first loads (either via state or fallback), snap to
-  // module 1, question 1. Re-clicking "Take It" creates a fresh mount
-  // anyway, so this is mostly belt-and-suspenders.
+  // --- Hydrate the state machine once the test (and its modules + break
+  // row) are in hand. On a fresh "Take It" entry we POST to /start for
+  // module 1 (idempotent — the server preserves module_started_at if
+  // already set). On a refresh mid-test we figure out which module is
+  // currently active from the timestamps on the test payload itself,
+  // so a refresh in module 3 doesn't restart the clock.
+  const hydratedRef = useRef(false);
   useEffect(() => {
-    if (test) {
-      setModuleNum(1);
-      setQuestionNum(1);
-    }
+    if (!test || hydratedRef.current) return;
+    hydratedRef.current = true;
+
+    (async () => {
+      try {
+        const mods = (test.modules ?? []).slice().sort((a, b) => a.id - b.id);
+        const breakDurationSec = Math.round(Number(test.break?.duration_minutes ?? 10) * 60);
+
+        // Find the first module that doesn't yet have a module_started_at
+        // set. That's the "current" module — the one we should resume on.
+        // If every module has started_at set, fall back to the first
+        // module that hasn't had its duration expire (computed against
+        // a synthetic now). If ALL have expired, the test is essentially
+        // done and we fall through to the runCompletion path on the
+        // first tick.
+        let activeIdx = mods.findIndex((m) => !m.module_started_at);
+        if (activeIdx === -1) {
+          // All started. Find one whose remaining is still > 0.
+          const now = Date.now();
+          activeIdx = mods.findIndex((m) => {
+            const durSec = Math.round(Number(m.duration_minutes) * 60);
+            const startedMs = Date.parse(m.module_started_at);
+            const elapsed = Math.floor((now - startedMs) / 1000) - (m.accumulated_pause_seconds || 0);
+            return elapsed < durSec;
+          });
+          if (activeIdx === -1) {
+            // Everything expired; show the saving view and let the tick
+            // finish things off. (Edge case — usually we'd just trigger
+            // completion immediately.)
+            dispatch({
+              type: 'HYDRATE',
+              machine: {
+                phase: 'saving',
+                module: null,
+                breakDurationSeconds: breakDurationSec,
+              },
+            });
+            void runCompletion();
+            return;
+          }
+        }
+
+        const activeMod = mods[activeIdx];
+        const moduleNum = activeMod.id;
+        const durSec = Math.round(Number(activeMod.duration_minutes) * 60);
+
+        // If this module hasn't been started yet, POST /start to stamp
+        // module_started_at. Otherwise just use the timestamps we
+        // already have on the test payload.
+        let startedAt = activeMod.module_started_at;
+        let pausedAt = activeMod.paused_at;
+        let accumulatedPause = activeMod.accumulated_pause_seconds || 0;
+        if (!startedAt) {
+          const started = await startModule(test.id, moduleNum);
+          startedAt = started.module_started_at;
+          pausedAt = started.paused_at;
+          accumulatedPause = started.accumulated_pause_seconds || 0;
+        }
+
+        const phase = pausedAt ? 'paused' : 'running';
+        dispatch({
+          type: 'HYDRATE',
+          machine: {
+            phase,
+            module: moduleNum,
+            startedAt,
+            pausedAt,
+            accumulatedPause,
+            durationSeconds: durSec,
+            breakDurationSeconds: breakDurationSec,
+            startedAtBreak: test.break?.started_at ?? null,
+            saveError: null,
+          },
+        });
+      } catch (err) {
+        setLoadError(err.message || String(err));
+      }
+    })();
   }, [test]);
 
-  if (loadError) {
-    return (
-      <div className="page">
-        <h1>Take Test</h1>
-        <p className="bad">Couldn't load test: {loadError}</p>
-        <button className="secondary" onClick={() => navigate('/')}>
-          ← Back to Home
-        </button>
-      </div>
-    );
+  // --- Tick: re-derive remaining from server timestamps every TICK_MS. --
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // --- Auto-progression on timer expiry -------------------------------
+  // Separate effect so the "what to do on expiry" logic lives in one
+  // place and we don't tangle it with the tick itself. We compare a
+  // computed remaining to a threshold of 0 and trigger transitions.
+  useEffect(() => {
+    if (machine.phase === 'running' || machine.phase === 'break') {
+      const remaining = computeRemaining(machine, nowMs);
+      if (remaining > 0) return;
+
+      if (machine.phase === 'running') {
+        // Decide where to go based on which module just ended.
+        if (machine.module === 1) {
+          // Start module 2
+          (async () => {
+            try {
+              const started = await startModule(test.id, 2);
+              const m2 = test.modules?.find((m) => m.id === 2);
+              dispatch({
+                type: 'MODULE_DONE',
+                nextStartedAt: started.module_started_at,
+                nextDurationSeconds: Math.round(Number(m2?.duration_minutes ?? 0) * 60),
+              });
+            } catch (err) {
+              console.error('Failed to start module 2:', err);
+            }
+          })();
+        } else if (machine.module === 2) {
+          // Start the break
+          (async () => {
+            try {
+              const started = await startBreak(test.id);
+              dispatch({
+                type: 'MODULE_DONE',
+                nextStartedAt: started.started_at,
+              });
+            } catch (err) {
+              console.error('Failed to start break:', err);
+            }
+          })();
+        } else if (machine.module === 3) {
+          // Start module 4
+          (async () => {
+            try {
+              const started = await startModule(test.id, 4);
+              const m4 = test.modules?.find((m) => m.id === 4);
+              dispatch({
+                type: 'MODULE_DONE',
+                nextStartedAt: started.module_started_at,
+                nextDurationSeconds: Math.round(Number(m4?.duration_minutes ?? 0) * 60),
+              });
+            } catch (err) {
+              console.error('Failed to start module 4:', err);
+            }
+          })();
+        } else if (machine.module === 4) {
+          // Complete the test.
+          dispatch({ type: 'MODULE_DONE' });
+          void runCompletion();
+        }
+      } else if (machine.phase === 'break') {
+        // Start module 3
+        (async () => {
+          try {
+            const started = await startModule(test.id, 3);
+            const m3 = test.modules?.find((m) => m.id === 3);
+            dispatch({
+              type: 'BREAK_DONE',
+              nextStartedAt: started.module_started_at,
+              nextDurationSeconds: Math.round(Number(m3?.duration_minutes ?? 0) * 60),
+            });
+          } catch (err) {
+            console.error('Failed to start module 3:', err);
+          }
+        })();
+      }
+    }
+    // runCompletion closes over the latest machine + test, declared below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machine.phase, nowMs, machine.module]);
+
+  // --- Completion -----------------------------------------------------
+  // The state machine is a reducer so it can't be invoked from within an
+  // effect above without causing lints. We define it as a ref-based
+  // helper that we call directly. It does:
+  //   1. flush all pending debounced autosaves (best effort)
+  //   2. POST /api/tests/upcoming/complete
+  //   3. on success: dispatch COMPLETE, then navigate to /
+  //   4. on failure: dispatch SAVE_ERROR so the user can retry
+  const answersRef = useRef(answers);
+  answersRef.current = answers;
+  async function runCompletion() {
+    // 1. Flush pending debounced autosaves. The debounceTimers map only
+    // holds the questionId of pending saves — we don't have the latest
+    // letter in the closure. Re-read from the latest answers map and
+    // PATCH directly (bypassing the debounce).
+    for (const [qid, timer] of debounceTimers.entries()) {
+      clearTimeout(timer);
+      debounceTimers.delete(qid);
+      const letter = answersRef.current[qid] ?? null;
+      try {
+        await updateAnswer(qid, letter);
+      } catch (err) {
+        console.error(`Final autosave for q${qid} failed:`, err);
+      }
+    }
+    // 2. Run the rotation.
+    try {
+      const res = await fetch('/api/tests/upcoming/complete', { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      dispatch({ type: 'COMPLETE' });
+      navigate('/');
+    } catch (err) {
+      dispatch({ type: 'SAVE_ERROR', error: err.message || String(err) });
+    }
   }
 
-  if (!test) {
-    return (
-      <div className="page">
-        <h1>Take Test</h1>
-        <p className="subtitle">Loading test…</p>
-      </div>
-    );
+  // --- Pause / resume handlers ----------------------------------------
+  async function handlePause() {
+    if (machine.phase !== 'running') return;
+    try {
+      const updated = await pauseModule(test.id, machine.module);
+      dispatch({ type: 'PAUSE', pausedAt: updated.paused_at });
+    } catch (err) {
+      console.error('Pause failed:', err);
+    }
+  }
+  async function handleResume() {
+    if (machine.phase !== 'paused') return;
+    try {
+      const updated = await resumeModule(test.id, machine.module);
+      dispatch({
+        type: 'RESUME',
+        accumulatedPause: updated.accumulated_pause_seconds,
+      });
+    } catch (err) {
+      console.error('Resume failed:', err);
+    }
   }
 
-  // Sorted list of question IDs for the current module, so the grid can
-  // render "1, 2, 3 … 27" rather than whatever the DB happened to return.
+  // --- Question navigation (pass 1, unchanged) ------------------------
+  const [moduleNum, setModuleNum] = useState(1);
+  const [questionNum, setQuestionNum] = useState(1);
+  const [gridOpen, setGridOpen] = useState(false);
+
   const moduleQuestions = useMemo(() => {
-    return (test.questions ?? [])
+    return (test?.questions ?? [])
       .filter((q) => q.module === moduleNum)
       .sort((a, b) => a.question_number - b.question_number);
   }, [test, moduleNum]);
@@ -158,9 +364,16 @@ export default function TakeTest() {
     (q) => q.question_number === questionNum
   ) ?? moduleQuestions[0];
 
-  // Reset to question 1 whenever the module changes — otherwise jumping
-  // from module 2 Q22 to module 3 would land on Q22 of module 3 (which
-  // only has 22 questions; this would 404 visually).
+  // When the state machine advances modules, keep the visible question
+  // number in sync. We map machine.module -> local moduleNum.
+  useEffect(() => {
+    if (machine.phase === 'running' || machine.phase === 'paused') {
+      if (machine.module && machine.module !== moduleNum) {
+        setModuleNum(machine.module);
+      }
+    }
+  }, [machine.phase, machine.module]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     setQuestionNum(1);
   }, [moduleNum]);
@@ -169,35 +382,37 @@ export default function TakeTest() {
     setQuestionNum(qNum);
     setGridOpen(false);
   }
-
   function selectAnswer(questionId, letter) {
     setAnswers((prev) => ({ ...prev, [questionId]: letter }));
     scheduleAutosave(questionId, letter);
   }
 
-  function next() {
-    if (questionNum < totalInModule) {
-      setQuestionNum(questionNum + 1);
-    } else if (moduleNum < 4) {
-      setModuleNum(moduleNum + 1);
-    }
+  // --- Render gates ---------------------------------------------------
+  if (loadError) {
+    return (
+      <div className="page">
+        <h1>Take Test</h1>
+        <p className="bad">Couldn't load test: {loadError}</p>
+        <button className="secondary" onClick={() => navigate('/')}>← Back to Home</button>
+      </div>
+    );
+  }
+  if (!test) {
+    return (
+      <div className="page">
+        <h1>Take Test</h1>
+        <p className="subtitle">Loading test…</p>
+      </div>
+    );
   }
 
-  function back() {
-    if (questionNum > 1) {
-      setQuestionNum(questionNum - 1);
-    } else if (moduleNum > 1) {
-      // Step back into the last question of the previous module.
-      const prevModuleTotal = (test.questions ?? []).filter(
-        (q) => q.module === moduleNum - 1
-      ).length;
-      setModuleNum(moduleNum - 1);
-      setQuestionNum(prevModuleTotal || 1);
-    }
-  }
-
-  const canBack = moduleNum > 1 || questionNum > 1;
-  const canNext = moduleNum < 4 || questionNum < totalInModule;
+  // Derived display values
+  const remaining = computeRemaining(machine, nowMs);
+  const moduleLabel =
+    machine.phase === 'break' ? 'Break' :
+    machine.phase === 'saving' ? 'Saving…' :
+    machine.phase === 'complete' ? 'Done' :
+    `Module ${machine.module}`;
 
   return (
     <div className="take-test">
@@ -210,30 +425,32 @@ export default function TakeTest() {
               onClick={() => setModuleNum(m)}
               role="tab"
               aria-selected={m === moduleNum}
+              // Tabs are dimmed but still clickable so the user can jump
+              // back to fill in earlier questions mid-test.
             >
               Module {m}
             </button>
           ))}
         </div>
-        <div className="tt-timer-placeholder">
-          {/* Pass 2 will fill this in with the live countdown + pause.
-           * For now there's a manual "next module" jump so we can test
-           * the layout end-to-end without timers. */}
-          <button
-            type="button"
-            className="tt-mod-next"
-            onClick={() => setModuleNum((m) => Math.min(4, m + 1))}
-            disabled={moduleNum === 4}
-            title="Pass-1 only: jump to the next module manually. Pass 2 makes this timer-driven."
-          >
-            next module →
-          </button>
-        </div>
+        <TakeTestTimer
+          phase={machine.phase}
+          remaining={remaining}
+          moduleLabel={moduleLabel}
+          onPause={handlePause}
+          onResume={handleResume}
+        />
       </header>
 
       <div className="tt-body">
-        {currentQuestion ? (
-          moduleNum <= 2 ? (
+        {machine.phase === 'break' ? (
+          <BreakView remaining={remaining} breakDurationSeconds={machine.breakDurationSeconds} />
+        ) : machine.phase === 'saving' || machine.phase === 'complete' ? (
+          <SavingView
+            error={machine.saveError}
+            onRetry={runCompletion}
+          />
+        ) : currentQuestion ? (
+          (moduleNum <= 2) ? (
             <SplitView
               question={currentQuestion}
               selected={answers[currentQuestion.id] ?? null}
@@ -251,46 +468,117 @@ export default function TakeTest() {
         )}
       </div>
 
-      <footer className="tt-footer">
-        <div className="tt-footer-meta">
-          {/* Reserved for a future "answered: N / Y" summary. */}
-        </div>
-        <div className="tt-footer-right">
-          <button className="secondary" onClick={back} disabled={!canBack}>
-            ← Back
-          </button>
-          <QuestionPill
-            current={questionNum}
-            total={totalInModule}
-            open={gridOpen}
-            onToggle={() => setGridOpen((o) => !o)}
-          />
-          <button className="primary" onClick={next} disabled={!canNext}>
-            Next →
-          </button>
-        </div>
-        {gridOpen && (
-          <>
-            <div
-              className="tt-grid-backdrop"
-              onClick={() => setGridOpen(false)}
-            />
-            <QuestionGrid
+      {/* Footer only meaningful while a module is on screen. */}
+      {(machine.phase === 'running' || machine.phase === 'paused') && (
+        <footer className="tt-footer">
+          <div className="tt-footer-meta" />
+          <div className="tt-footer-right">
+            <button
+              className="secondary"
+              onClick={() => {
+                if (questionNum > 1) setQuestionNum(questionNum - 1);
+                else if (moduleNum > 1) {
+                  const prevTotal = (test.questions ?? []).filter(
+                    (q) => q.module === moduleNum - 1
+                  ).length;
+                  setModuleNum(moduleNum - 1);
+                  setQuestionNum(prevTotal || 1);
+                }
+              }}
+              disabled={moduleNum === 1 && questionNum === 1}
+            >
+              ← Back
+            </button>
+            <QuestionPill
               current={questionNum}
               total={totalInModule}
-              answersById={answers}
-              moduleQuestions={moduleQuestions}
-              onPick={goToQuestion}
+              open={gridOpen}
+              onToggle={() => setGridOpen((o) => !o)}
             />
-          </>
-        )}
-      </footer>
+            <button
+              className="primary"
+              onClick={() => {
+                if (questionNum < totalInModule) setQuestionNum(questionNum + 1);
+                else if (moduleNum < 4) {
+                  setModuleNum(moduleNum + 1);
+                  setQuestionNum(1);
+                } else {
+                  // On the last question of module 4: manual "Finish"
+                  // triggers the same completion flow as the timer.
+                  dispatch({ type: 'MODULE_DONE' });
+                  void runCompletion();
+                }
+              }}
+            >
+              {moduleNum === 4 && questionNum === totalInModule ? 'Finish' : 'Next →'}
+            </button>
+          </div>
+          {gridOpen && (
+            <>
+              <div className="tt-grid-backdrop" onClick={() => setGridOpen(false)} />
+              <QuestionGrid
+                current={questionNum}
+                total={totalInModule}
+                answersById={answers}
+                moduleQuestions={moduleQuestions}
+                onPick={goToQuestion}
+              />
+            </>
+          )}
+        </footer>
+      )}
+
+      {machine.phase === 'paused' && <PauseOverlay onResume={handleResume} />}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// "Question X of Y" pill in the footer. Toggles the drop-up grid.
+// Break view. Big clock in the middle, a calm message. The break is not
+// pausable so there's no Pause button — the TakeTestTimer's "Break" chip
+// (disabled) is the only header control visible.
+// ---------------------------------------------------------------------------
+function BreakView({ remaining, breakDurationSeconds }) {
+  return (
+    <div className="tt-break-view">
+      <h2 className="tt-break-title">Break</h2>
+      <div className="tt-break-clock">{formatMmSs(remaining)}</div>
+      <p className="tt-break-hint">
+        Module 3 will start automatically when the timer reaches zero.
+        The break cannot be paused.
+      </p>
+      <p className="subtitle">
+        (Total break length: {formatMmSs(breakDurationSeconds)})
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Saving view. Shown once module 4's timer has hit 0. We POST the rotation,
+// then either navigate to home (on success) or show a Retry button (on
+// failure).
+// ---------------------------------------------------------------------------
+function SavingView({ error, onRetry }) {
+  if (error) {
+    return (
+      <div className="tt-saving-view">
+        <h2 className="tt-saving-title">Couldn't finish the test</h2>
+        <p className="tt-saving-error">{error}</p>
+        <button className="tt-saving-retry" onClick={onRetry}>Retry</button>
+      </div>
+    );
+  }
+  return (
+    <div className="tt-saving-view">
+      <h2 className="tt-saving-title">Saving your test…</h2>
+      <p className="tt-saving-sub">One moment.</p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// (pass 1 sub-components — unchanged)
 // ---------------------------------------------------------------------------
 function QuestionPill({ current, total, open, onToggle }) {
   return (
@@ -305,11 +593,6 @@ function QuestionPill({ current, total, open, onToggle }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Drop-up grid: one cell per question in the current module. Answered
-// questions are tinted, the current question is filled. Clicking a cell
-// jumps to that question and closes the grid.
-// ---------------------------------------------------------------------------
 function QuestionGrid({ current, total, answersById, moduleQuestions, onPick }) {
   return (
     <div className="tt-grid" role="dialog" aria-label="Jump to question">
@@ -336,22 +619,13 @@ function QuestionGrid({ current, total, answersById, moduleQuestions, onPick }) 
         })}
       </div>
       <div className="tt-grid-legend">
-        <span>
-          <span className="tt-grid-legend-swatch tt-grid-legend-current" />
-          current
-        </span>
-        <span>
-          <span className="tt-grid-legend-swatch tt-grid-legend-answered" />
-          answered
-        </span>
+        <span><span className="tt-grid-legend-swatch tt-grid-legend-current" /> current</span>
+        <span><span className="tt-grid-legend-swatch tt-grid-legend-answered" /> answered</span>
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// LHS/RHS layout for modules 1 & 2.
-// ---------------------------------------------------------------------------
 function SplitView({ question, selected, onSelect }) {
   return (
     <div className="tt-split">
@@ -384,9 +658,6 @@ function SplitView({ question, selected, onSelect }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Single-column layout for modules 3 & 4.
-// ---------------------------------------------------------------------------
 function SingleColumnView({ question, selected, onSelect }) {
   return (
     <div className="tt-single">
@@ -415,9 +686,6 @@ function SingleColumnView({ question, selected, onSelect }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// The four A/B/C/D buttons. Highlighted when `selected` matches.
-// ---------------------------------------------------------------------------
 function OptionList({ selected, onSelect, options }) {
   const letters = ['a', 'b', 'c', 'd'];
   return (
