@@ -1,14 +1,31 @@
 const { Pool } = require('pg');
-require('dotenv').config(); // Loads your .env file
+require('dotenv').config();
 
-// Create a new connection pool using your .env credentials
+
+// Replace this with your Supabase connection string:
+const connectionString = process.env.SUPABASE
+
 const pool = new Pool({
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT,
-  database: process.env.DB_NAME,
+  connectionString: connectionString,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
 
-// Export the pool so other files can use it
+// Test the connection
+pool.on('connect', () => {
+  console.log('✓ Connected to Supabase PostgreSQL');
+});
+
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle client', err);
+  process.exit(-1);
+});
+
+// Query helper function
+const query = (text, params) => pool.query(text, params);
+
+// Transaction helper
+const getClient = () => pool.connect();
+
 module.exports = pool;
