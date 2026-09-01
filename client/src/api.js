@@ -6,7 +6,7 @@
 // All endpoints go through Vite's /api proxy in dev (see vite.config.js),
 // so we just use relative paths.
 
-const BASE = '/api';
+   const BASE = `${import.meta.env.VITE_API_URL || ''}/api`;
 
 // Internal: do a fetch and return parsed JSON, or null on 404. Throws on
 // any other non-2xx so the caller can render an error. We treat 404 as
