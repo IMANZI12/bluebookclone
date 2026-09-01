@@ -74,7 +74,14 @@ export default function Home() {
         <p className="subtitle">Personal SAT-style practice tests</p>
       </header>
 
-      {error && <p className="bad">Couldn't load tests: {error}</p>}
+      {error && (
+        <div className="home-error">
+          <p className="bad">Couldn't load tests: {error}</p>
+          <button type="button" className="secondary" onClick={() => window.location.reload()}>
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* The three primary cards. Empty-state placeholders stand in for
           'latest' / 'oldest' when those slots don't exist yet. */}

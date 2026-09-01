@@ -10,6 +10,8 @@
 //     server/db/migrate.js.
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const pool = require('../db/db');
 
 const router = express.Router();
@@ -20,6 +22,10 @@ const ALLOWED_STATUSES = new Set(['upcoming', 'latest', 'oldest']);
 const EXPECTED_COUNTS = { 1: 27, 2: 27, 3: 22, 4: 22 };
 const VALID_MODULES = Object.keys(EXPECTED_COUNTS).map(Number);
 const VALID_ANSWERS = new Set(['A', 'B', 'C', 'D']);
+
+// Phase 8: absolute path to the uploads root, used to wipe a replaced
+// test's image folder when the create flow swaps in a new 'upcoming' row.
+const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
 
 // ---------------------------------------------------------------------------
 // POST /api/tests
@@ -150,6 +156,33 @@ router.post('/', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Phase 8: this app only ever has one 'upcoming' test at a time, and a
+    // partial submit (test row created, image uploads interrupted) can leave
+    // an abandoned 'upcoming' row that blocks the next create. To avoid
+    // that AND the legacy "duplicate upcoming test" failure mode, drop any
+    // existing 'upcoming' test before inserting the new one. ON DELETE
+    // CASCADE pulls its modules/questions/breaks; we also wipe the on-disk
+    // uploads folder for the replaced test id so the disk doesn't fill up
+    // with orphan images. (The disk wipe is best-effort — the DB write
+    // already commits at this point, and a leftover folder is harmless.)
+    const { rows: existingUpcoming } = await client.query(
+      `SELECT id FROM tests WHERE status = 'upcoming'`
+    );
+    for (const row of existingUpcoming) {
+      await client.query(`DELETE FROM tests WHERE id = $1`, [row.id]);
+      try {
+        const dir = path.join(UPLOADS_ROOT, String(row.id));
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      } catch (fsErr) {
+        console.warn(
+          `Could not remove uploads folder for replaced test ${row.id}:`,
+          fsErr.message
+        );
+      }
+    }
 
     const { rows: [test] } = await client.query(
       `INSERT INTO tests (status) VALUES ('upcoming') RETURNING id, status, created_at`

@@ -15,7 +15,7 @@
 // client/src/lib/testMachine.js. The component is otherwise the same as
 // pass 1 (preload-on-entry, layout, question grid, autosave).
 
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState, useCallback } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   getUpcomingTest,
@@ -43,16 +43,20 @@ const TICK_MS = 500;
 
 // ---------------------------------------------------------------------------
 // Per-question debounced autosave. Same as pass 1 — kept outside the
-// component so the timer map survives re-renders.
+// component so the timer map survives re-renders. Phase 8: takes an
+// onFailure callback so a failed PATCH surfaces in the UI as a banner
+// (otherwise the user could answer 30 questions and silently lose them
+// if the network goes down).
 // ---------------------------------------------------------------------------
 const debounceTimers = new Map();
-function scheduleAutosave(questionId, letter) {
+function scheduleAutosave(questionId, letter, onFailure) {
   const existing = debounceTimers.get(questionId);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
     debounceTimers.delete(questionId);
     updateAnswer(questionId, letter).catch((err) => {
       console.error(`Autosave for question ${questionId} failed:`, err.message);
+      if (onFailure) onFailure(questionId, err.message || String(err));
     });
   }, 500);
   debounceTimers.set(questionId, timer);
@@ -68,9 +72,14 @@ export default function TakeTest() {
   const navigate = useNavigate();
 
   // Test payload passed via router state from Home. Fall back to a fetch
-  // if the user refreshed or deep-linked into /take/:testId.
+  // if the user refreshed or deep-linked into /take/:testId. We do a
+  // tiny shape check here so that a bogus / partially-formed test object
+  // (e.g. from a stale tab or a manual router push) drops through to
+  // the fetch path instead of crashing the hydration effect below.
   const passedTest = location.state?.test;
-  const [test, setTest] = useState(passedTest ?? null);
+  const looksLikeTest = (t) =>
+    t && typeof t === 'object' && Number.isInteger(t.id) && Array.isArray(t.questions);
+  const [test, setTest] = useState(looksLikeTest(passedTest) ? passedTest : null);
   const [loadError, setLoadError] = useState(null);
 
   // Answer map, seeded from the test payload so refresh resumes cleanly.
@@ -118,6 +127,12 @@ export default function TakeTest() {
   // already set). On a refresh mid-test we figure out which module is
   // currently active from the timestamps on the test payload itself,
   // so a refresh in module 3 doesn't restart the clock.
+  //
+  // Phase 8: the previous version checked for "first module without
+  // module_started_at" first, which was wrong for the break — module
+  // 3 had no started_at yet so it picked module 3 and cut the break
+  // short. We now special-case the break before falling through to
+  // the per-module logic.
   const hydratedRef = useRef(false);
   useEffect(() => {
     if (!test || hydratedRef.current) return;
@@ -126,7 +141,53 @@ export default function TakeTest() {
     (async () => {
       try {
         const mods = (test.modules ?? []).slice().sort((a, b) => a.id - b.id);
-        const breakDurationSec = Math.round(Number(test.break?.duration_minutes ?? 10) * 60);
+        const breakRow = test.break ?? null;
+        const breakDurationSec = Math.round(
+          Number(breakRow?.duration_minutes ?? 10) * 60
+        );
+
+        // Phase 8: bail out on a malformed payload rather than crashing
+        // through to the saving/complete path with no real data to save.
+        // (Server validation should prevent this, but defense-in-depth.)
+        if (mods.length === 0) {
+          setLoadError(
+            'This test has no modules and cannot be started. ' +
+            'Go back home and create a new test.'
+          );
+          return;
+        }
+
+        // --- Special case: user is on the break. -----------------------------
+        // The break row has its own started_at, set when module 2 ended. If
+        // it's set AND the break is still in progress (i.e. the elapsed
+        // time is less than the configured break length), we're on the
+        // break regardless of which modules have started_at set. If the
+        // break has already expired we fall through and let the normal
+        // module logic pick up — it'll find module 3 still unstarted and
+        // start it, which is the correct behavior.
+        if (breakRow?.started_at) {
+          const breakStartMs = Date.parse(breakRow.started_at);
+          if (!Number.isNaN(breakStartMs)) {
+            const breakElapsedSec = Math.floor((Date.now() - breakStartMs) / 1000);
+            if (breakElapsedSec < breakDurationSec) {
+              dispatch({
+                type: 'HYDRATE',
+                machine: {
+                  phase: 'break',
+                  module: null,
+                  startedAt: null,
+                  pausedAt: null,
+                  accumulatedPause: 0,
+                  durationSeconds: 0,
+                  breakDurationSeconds: breakDurationSec,
+                  startedAtBreak: breakRow.started_at,
+                  saveError: null,
+                },
+              });
+              return;
+            }
+          }
+        }
 
         // Find the first module that doesn't yet have a module_started_at
         // set. That's the "current" module — the one we should resume on.
@@ -142,6 +203,7 @@ export default function TakeTest() {
           activeIdx = mods.findIndex((m) => {
             const durSec = Math.round(Number(m.duration_minutes) * 60);
             const startedMs = Date.parse(m.module_started_at);
+            if (Number.isNaN(startedMs)) return false;
             const elapsed = Math.floor((now - startedMs) / 1000) - (m.accumulated_pause_seconds || 0);
             return elapsed < durSec;
           });
@@ -190,7 +252,7 @@ export default function TakeTest() {
             accumulatedPause,
             durationSeconds: durSec,
             breakDurationSeconds: breakDurationSec,
-            startedAtBreak: test.break?.started_at ?? null,
+            startedAtBreak: breakRow?.started_at ?? null,
             saveError: null,
           },
         });
@@ -300,7 +362,12 @@ export default function TakeTest() {
     // 1. Flush pending debounced autosaves. The debounceTimers map only
     // holds the questionId of pending saves — we don't have the latest
     // letter in the closure. Re-read from the latest answers map and
-    // PATCH directly (bypassing the debounce).
+    // PATCH directly (bypassing the debounce). If a final save fails
+    // we keep a list of failed question IDs and surface them to the
+    // user via the saving-view's error message + a "Retry" button —
+    // the answers stay in the in-memory map and will be re-flushed on
+    // the next runCompletion call.
+    const failedSaves = [];
     for (const [qid, timer] of debounceTimers.entries()) {
       clearTimeout(timer);
       debounceTimers.delete(qid);
@@ -309,7 +376,21 @@ export default function TakeTest() {
         await updateAnswer(qid, letter);
       } catch (err) {
         console.error(`Final autosave for q${qid} failed:`, err);
+        failedSaves.push(qid);
       }
+    }
+    if (failedSaves.length > 0) {
+      // Don't try the rotation yet — the rotation would promote this
+      // test to 'latest', and then any retry of the failed saves would
+      // hit a frozen questions row. (Provided_answer is writable on
+      // past tests too, but visually it's wrong to keep editing a test
+      // the user is trying to complete.) Surface the failure and let
+      // the user retry from this exact screen.
+      dispatch({
+        type: 'SAVE_ERROR',
+        error: `${failedSaves.length} final answer save(s) failed. Click Retry to try again.`,
+      });
+      return;
     }
     // 2. Run the rotation.
     try {
@@ -353,6 +434,19 @@ export default function TakeTest() {
   const [questionNum, setQuestionNum] = useState(1);
   const [gridOpen, setGridOpen] = useState(false);
 
+  // Phase 8: surface autosave failures. The debounce function in
+  // scheduleAutosave gets a callback that bumps this counter; the
+  // header banner is shown when count > 0. We deliberately don't try
+  // to keep a per-question failure map — knowing "1 of your answers
+  // didn't save" is enough; the user can re-pick the same answer on
+  // the next interaction and it'll reschedule the autosave.
+  const [autosaveErrorCount, setAutosaveErrorCount] = useState(0);
+  const [autosaveErrorMessage, setAutosaveErrorMessage] = useState(null);
+  const handleAutosaveFailure = useCallback((qid, msg) => {
+    setAutosaveErrorCount((c) => c + 1);
+    setAutosaveErrorMessage(msg);
+  }, []);
+
   const moduleQuestions = useMemo(() => {
     return (test?.questions ?? [])
       .filter((q) => q.module === moduleNum)
@@ -384,7 +478,15 @@ export default function TakeTest() {
   }
   function selectAnswer(questionId, letter) {
     setAnswers((prev) => ({ ...prev, [questionId]: letter }));
-    scheduleAutosave(questionId, letter);
+    // Clear the autosave-error banner on the next interaction — the user
+    // is re-engaging with the test, so we don't want a stale "saves are
+    // failing" warning. If the network is still down, the next autosave
+    // will re-bump the count and the banner reappears.
+    if (autosaveErrorCount > 0) {
+      setAutosaveErrorCount(0);
+      setAutosaveErrorMessage(null);
+    }
+    scheduleAutosave(questionId, letter, handleAutosaveFailure);
   }
 
   // --- Render gates ---------------------------------------------------
@@ -416,6 +518,14 @@ export default function TakeTest() {
 
   return (
     <div className="take-test">
+      {autosaveErrorCount > 0 && (
+        <div className="tt-autosave-warning" role="status" aria-live="polite">
+          ⚠ {autosaveErrorCount} answer{autosaveErrorCount === 1 ? '' : 's'}{' '}
+          couldn't be autosaved
+          {autosaveErrorMessage ? ` — ${autosaveErrorMessage}` : ''}. Your
+          selections are kept in memory; pick an answer again to retry.
+        </div>
+      )}
       <header className="tt-header">
         <div className="tt-module-tabs" role="tablist" aria-label="Module">
           {MODULES.map((m) => (

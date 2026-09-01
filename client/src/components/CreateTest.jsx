@@ -27,6 +27,10 @@ import { createTest, uploadQuestionImage } from '../api.js';
 const COUNTS = { 1: 27, 2: 27, 3: 22, 4: 22 };
 const MODULES = [1, 2, 3, 4];
 const TOTAL_STEPS = 6;
+// Phase 8: mirror of the server's MAX_FILE_BYTES (questions.js). Anything
+// larger gets rejected at the file-picker so the user finds out immediately
+// instead of after waiting for the upload to round-trip.
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const STEP_LABELS = [
   'Module 1',
   'Module 2',
@@ -78,6 +82,17 @@ function initQuestions() {
   return out;
 }
 
+// Phase 8: friendly byte-size formatter for the file-picker hint. Rounds
+// to one decimal place and uses KB/MB/GB. Bytes < 1 KB render as "<1 KB"
+// to avoid silly values like "523 B".
+function formatBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 // Returns an array of human-readable missing-field strings for one question.
 // Empty array means the question is complete. Used by both the per-module
 // progress text and the Review step's missing-fields list.
@@ -119,10 +134,17 @@ export default function CreateTest() {
   const [questions, setQuestions] = useState(initQuestions);
 
   // Submit lifecycle. progressText is shown on the Submit button when
-  // uploading images (e.g. "Uploading images… 3 / 7").
+  // uploading images (e.g. "Uploading images… 3 / 7"). `partialUpload`
+  // is non-null when the test row was created but at least one image
+  // upload failed; in that case we expose a Retry button that resumes
+  // uploads instead of forcing the user to re-fill the wizard.
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
+  // Track an in-flight partial upload: the created test id + a list of
+  // image upload jobs that have not yet been POSTed successfully. The
+  // retry path re-runs the loop on this same list.
+  const [partialUpload, setPartialUpload] = useState(null);
 
   // Updater for a single field on a single question. Defined as a function
   // inside the component so it always sees the latest `questions` closure.
@@ -154,14 +176,24 @@ export default function CreateTest() {
   }, [questions]);
 
   // True iff all 98 questions are complete AND every duration (modules +
-  // break) is a positive number. Review step's submit button is disabled
-  // when this is false. Fractional durations are allowed (e.g. 0.1 for
-  // short test runs), so we only check Number.isFinite and > 0.
+  // break) is a positive number AND no picked image exceeds the server's
+  // size cap. Review step's submit button is disabled when this is false.
+  // Fractional durations are allowed (e.g. 0.1 for short test runs), so
+  // we only check Number.isFinite and > 0.
   const allComplete = useMemo(() => {
     if (validation.totalComplete !== 98) return false;
     if (!Number.isFinite(breakMinutes) || breakMinutes <= 0) return false;
-    return durations.every((d) => Number.isFinite(d) && d > 0);
-  }, [validation, durations, breakMinutes]);
+    if (!durations.every((d) => Number.isFinite(d) && d > 0)) return false;
+    // Phase 8: any oversized picked image blocks submit. The user sees
+    // the inline warning at the file-picker; this just enforces it.
+    for (const m of MODULES) {
+      for (let n = 1; n <= COUNTS[m]; n++) {
+        const f = questions[m][n].file;
+        if (f && f.size > MAX_IMAGE_BYTES) return false;
+      }
+    }
+    return true;
+  }, [validation, durations, breakMinutes, questions]);
 
   // Flatten the missing-fields-per-question into the human-readable lines
   // for the Review step, e.g. "Module 2, Question 14: missing option C,
@@ -197,6 +229,7 @@ export default function CreateTest() {
     if (!allComplete || submitting) return;
     setSubmitting(true);
     setSubmitError(null);
+    setPartialUpload(null);
 
     // Build the JSON payload the server expects. Note image_path is null
     // for every question; the actual files go up in a second pass.
@@ -207,6 +240,7 @@ export default function CreateTest() {
       break_minutes: breakMinutes,
       questions: [],
     };
+    const fileJobs = [];
     for (const m of MODULES) {
       for (let n = 1; n <= COUNTS[m]; n++) {
         const q = questions[m][n];
@@ -222,45 +256,102 @@ export default function CreateTest() {
           option_d: q.option_d.trim(),
           correct_answer: q.correct_answer.trim(),
         });
+        if (q.file) fileJobs.push({ module: m, qNum: n, file: q.file });
       }
     }
 
     try {
       const created = await createTest(payload);
-      // Build a (module, question_number) -> id map from the response.
+      await runUploads(created, fileJobs);
+    } catch (err) {
+      setSubmitError(err.message || String(err));
+      setSubmitting(false);
+    }
+  }
+
+  // Re-runs the image upload loop for an already-created test. Used by
+  // the initial submit AND the retry button when an upload fails partway.
+  // The server's POST /api/tests replaces any pre-existing upcoming test,
+  // so retrying is safe and the user is never left with an orphan row.
+  async function runUploads(created, fileJobs) {
+    // Build a (module, question_number) -> id map from the response.
+    const idMap = new Map();
+    for (const ins of created.questions ?? []) {
+      idMap.set(`${ins.module}-${ins.question_number}`, ins.id);
+    }
+    setUploadProgress({ done: 0, total: fileJobs.length });
+
+    for (let i = 0; i < fileJobs.length; i++) {
+      const { module, qNum, file } = fileJobs[i];
+      const qid = idMap.get(`${module}-${qNum}`);
+      if (!qid) {
+        // Shouldn't happen — the server gave us one row per question we
+        // sent. If it does, skip the file and keep going so one missing
+        // ID doesn't strand the others.
+        console.warn(`No question id for module ${module} q${qNum}; skipping image.`);
+        setUploadProgress({ done: i + 1, total: fileJobs.length });
+        continue;
+      }
+      try {
+        await uploadQuestionImage(qid, file);
+        setUploadProgress({ done: i + 1, total: fileJobs.length });
+      } catch (uploadErr) {
+        // Partial-submit: the test row is created in the DB and some
+        // images may have uploaded, but this one failed. Stash the
+        // remaining jobs so the retry button can re-attempt them.
+        const remaining = fileJobs.slice(i);
+        setPartialUpload({
+          testId: created.id,
+          remaining,
+          alreadyDone: i,
+        });
+        throw uploadErr;
+      }
+    }
+
+    // All done. Head back to home; its useEffect re-fetches and the
+    // new Upcoming card will appear.
+    navigate('/');
+  }
+
+  // Retry button handler. Re-runs the upload loop on the remaining
+  // (not-yet-uploaded) files. The server's POST /api/tests created a
+  // fresh 'upcoming' row, so re-uploading to the same question IDs is
+  // safe — the file is just overwritten with a new timestamped name.
+  async function handleRetryUploads() {
+    if (!partialUpload || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      // Re-fetch the test so we have a fresh questions list (in case the
+      // page was reloaded after the partial submit). The idMap built here
+      // maps (module, question_number) to question.id, which is what the
+      // upload endpoint needs.
+      const res = await fetch(`/api/tests/${partialUpload.testId}`);
+      if (!res.ok) {
+        throw new Error(`Could not re-fetch test ${partialUpload.testId}`);
+      }
+      const fresh = await res.json();
       const idMap = new Map();
-      for (const ins of created.questions ?? []) {
-        idMap.set(`${ins.module}-${ins.question_number}`, ins.id);
+      for (const q of fresh.questions ?? []) {
+        idMap.set(`${q.module}-${q.question_number}`, q.id);
       }
+      const { remaining, alreadyDone } = partialUpload;
+      const total = alreadyDone + remaining.length;
+      setUploadProgress({ done: alreadyDone, total });
 
-      // Collect the questions that actually have a file picked. Sequential
-      // uploads are fine here — localhost is fast and the count is small.
-      const fileJobs = [];
-      for (const m of MODULES) {
-        for (let n = 1; n <= COUNTS[m]; n++) {
-          const f = questions[m][n].file;
-          if (f) fileJobs.push({ module: m, qNum: n, file: f });
-        }
-      }
-      setUploadProgress({ done: 0, total: fileJobs.length });
-
-      for (let i = 0; i < fileJobs.length; i++) {
-        const { module, qNum, file } = fileJobs[i];
+      for (let i = 0; i < remaining.length; i++) {
+        const { module, qNum, file } = remaining[i];
         const qid = idMap.get(`${module}-${qNum}`);
         if (!qid) {
-          // Shouldn't happen — the server gave us one row per question we
-          // sent. If it does, skip the file and keep going so one missing
-          // ID doesn't strand the others.
-          console.warn(`No question id for module ${module} q${qNum}; skipping image.`);
-          setUploadProgress({ done: i + 1, total: fileJobs.length });
+          console.warn(`Retry: no question id for module ${module} q${qNum}; skipping.`);
+          setUploadProgress({ done: alreadyDone + i + 1, total });
           continue;
         }
         await uploadQuestionImage(qid, file);
-        setUploadProgress({ done: i + 1, total: fileJobs.length });
+        setUploadProgress({ done: alreadyDone + i + 1, total });
       }
-
-      // All done. Head back to home; its useEffect re-fetches and the
-      // new Upcoming card will appear.
+      setPartialUpload(null);
       navigate('/');
     } catch (err) {
       setSubmitError(err.message || String(err));
@@ -355,7 +446,26 @@ export default function CreateTest() {
       </footer>
 
       {submitError && (
-        <p className="bad ct-error">Submit failed: {submitError}</p>
+        <div className="ct-error-block">
+          <p className="bad ct-error">
+            Submit failed: {submitError}
+            {partialUpload
+              ? ` The test row was created (id ${partialUpload.testId}); ${partialUpload.remaining.length} image upload(s) still pending. You can retry the uploads below — your answers and previously-uploaded images are saved.`
+              : ''}
+          </p>
+          {partialUpload && (
+            <button
+              type="button"
+              className="primary"
+              onClick={handleRetryUploads}
+              disabled={submitting}
+            >
+              {submitting
+                ? `Retrying uploads… ${uploadProgress.done} / ${uploadProgress.total}`
+                : `Retry ${partialUpload.remaining.length} image upload(s)`}
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -473,12 +583,21 @@ function QuestionForm({ moduleNum, qNum, value, missing, onChange }) {
           accept="image/*"
           onChange={(e) => {
             const file = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+            // Phase 8: pre-check file size against the server's cap so the
+            // user finds out immediately rather than after a failed upload.
+            // We still keep the file in state (not rejected outright) so
+            // the user can see the size in the hint and pick a different
+            // file via the remove button — but the upload step will also
+            // re-check, and the submit button stays disabled.
             onChange(qNum, 'file', file);
           }}
         />
         {value.file && (
           <span className="file-hint">
-            {value.file.name}{' '}
+            {value.file.name}
+            {' '}
+            <span className="file-size">({formatBytes(value.file.size)})</span>
+            {' '}
             <button
               type="button"
               className="link-button"
@@ -486,6 +605,11 @@ function QuestionForm({ moduleNum, qNum, value, missing, onChange }) {
             >
               remove
             </button>
+            {value.file.size > MAX_IMAGE_BYTES && (
+              <span className="field-error" style={{ marginLeft: 8 }}>
+                Image is too large (max {formatBytes(MAX_IMAGE_BYTES)}). Pick a smaller file.
+              </span>
+            )}
           </span>
         )}
       </label>

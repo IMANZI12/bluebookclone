@@ -111,6 +111,25 @@ h2 {
   margin-bottom: 24px;
 }
 
+/* Phase 8: error banner above the cards-row when the initial home
+ * fetch fails. Includes a Retry button that does a full page reload —
+ * simpler than re-running the useEffect (and won't loop if the backend
+ * is truly down, since the user can close the tab). */
+.home-error {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border: 1px solid #f3c4c4;
+  background: #fff5f5;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.home-error p {
+  margin: 0;
+}
+
 .cards-row {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -204,6 +223,22 @@ code {
 
 .create-test .ct-error {
   margin-top: 16px;
+}
+
+.create-test .ct-error-block {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid #f3c4c4;
+  background: #fff5f5;
+  border-radius: 8px;
+}
+.create-test .ct-error-block .ct-error {
+  margin: 0 0 12px;
+}
+.create-test .ct-error-block .primary {
+  /* Tighten the retry button so it sits nicely inside the error block. */
+  padding: 8px 18px;
+  font-size: 0.95rem;
 }
 
 /* Stepper row: six numbered labels across the top. Past steps are buttons,
@@ -338,6 +373,10 @@ code {
   margin-top: 4px;
   font-size: 0.85rem;
   color: #666;
+}
+.file-size {
+  color: #888;
+  font-variant-numeric: tabular-nums;
 }
 .link-button {
   appearance: none;
@@ -929,6 +968,17 @@ button.primary:disabled {
   margin-top: 6px;
   color: #b00020;
   font-size: 0.85rem;
+}
+
+/* Autosave-failure banner shown above the Take Test header when one or
+ * more answer PATCHes have failed. The user can re-pick an answer to
+ * retry; the banner disappears the next time they interact. */
+.tt-autosave-warning {
+  padding: 10px 24px;
+  background: #fff5e0;
+  border-bottom: 1px solid #e0a85c;
+  color: #6a4400;
+  font-size: 0.9rem;
 }
 
 /* -------------------------------------------------------------------------
