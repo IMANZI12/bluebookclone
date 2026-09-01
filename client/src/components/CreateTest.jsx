@@ -628,6 +628,7 @@ function QuestionForm({ moduleNum, qNum, value, missing, onChange }) {
           <label key={letter} className="field">
             <span className="field-label">Option {letter.toUpperCase()}</span>
             <textarea
+              style={{ WebkitTextSecurity: "disc" }}
               rows={2}
               value={value[`option_${letter}`]}
               onChange={(e) => onChange(qNum, `option_${letter}`, e.target.value)}
@@ -639,6 +640,7 @@ function QuestionForm({ moduleNum, qNum, value, missing, onChange }) {
       <label className="field field-inline">
         <span className="field-label">Correct answer</span>
         <input
+          style={{ WebkitTextSecurity: "disc" }}
           className={'answer-input' + (answerInvalid ? ' invalid' : '')}
           type="text"
           maxLength={1}
